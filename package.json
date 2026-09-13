@@ -4,9 +4,11 @@
   "main": "server.js",
   "scripts": {
     "start": "node server.js",
-    "dev": "node --watch server.js"
+    "dev": "node --watch server.js",
+    "verify": "node scripts/verify.js"
   },
   "dependencies": {
+    "better-sqlite3": "^12.11.1",
     "express": "^4.19.2"
   },
   "name": "wxyy-14-backend-api"

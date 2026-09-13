@@ -27,8 +27,8 @@ module.exports = {
     },
     tourBoxes: {
       label: '巡演装箱单',
-      defaultStatus: '草稿',
-      statuses: ['草稿', '已装箱', '巡演中', '返场清点中', '已闭环'],
+      defaultStatus: '已装箱',
+      statuses: ['已装箱', '巡演中', '返场清点中', '已闭环'],
       required: ['showName', 'venue', 'play', 'headIds', 'accessoryIds'],
       titleFields: ['showName', 'play']
     },
@@ -57,6 +57,34 @@ module.exports = {
       note: '返场发现掉彩'
     },
     {
+      collection: 'puppetHeads',
+      id: 'head-seed-2',
+      status: '可演出',
+      data: {
+        role: '老生',
+        play: '火焰山',
+        paintStatus: '完好',
+        mechanism: '正常',
+        accessories: ['鹤氅'],
+        boxNo: '木箱甲-01',
+        currentUsable: true
+      }
+    },
+    {
+      collection: 'puppetHeads',
+      id: 'head-seed-3',
+      status: '可演出',
+      data: {
+        role: '花旦',
+        play: '白蛇传',
+        paintStatus: '完好',
+        mechanism: '正常',
+        accessories: ['凤冠'],
+        boxNo: '木箱甲-02',
+        currentUsable: true
+      }
+    },
+    {
       collection: 'accessories',
       id: 'accessory-seed-1',
       status: '在库',
@@ -65,6 +93,17 @@ module.exports = {
         role: '武生',
         play: '火焰山',
         boxNo: '配件箱-02'
+      }
+    },
+    {
+      collection: 'accessories',
+      id: 'accessory-seed-2',
+      status: '在库',
+      data: {
+        name: '鹤氅',
+        role: '老生',
+        play: '火焰山',
+        boxNo: '配件箱-03'
       }
     }
   ],
