@@ -172,6 +172,50 @@ function applyQuery(records, query) {
   });
 }
 
+// 物品类集合：被巡演闭环引用，通用接口的删除/改状态需要额外守卫
+const ITEM_COLLECTIONS = new Set(['puppetHeads', 'accessories']);
+
+// 物品被哪些装箱单引用（含已闭环的历史单）；未闭环的引用即为占用
+function itemBoxRefs(itemId) {
+  return db.prepare(
+    `SELECT i.box_id AS boxId, b.status AS boxStatus FROM tour_box_items i
+     JOIN records b ON b.id = i.box_id AND b.collection = 'tourBoxes'
+     WHERE i.item_id = ?`
+  ).all(itemId);
+}
+
+// 占用中的物品状态只能经工作流（返场清点/缺损处理）变更；「已装箱」只能由装箱流程进入
+function guardItemStatusChange(collection, id, targetStatus, currentStatus) {
+  if (!ITEM_COLLECTIONS.has(collection)) return;
+  if (targetStatus === '已装箱' && currentStatus !== '已装箱') {
+    const error = new Error('「已装箱」状态只能由装箱流程设置');
+    error.status = 409;
+    throw error;
+  }
+  if (targetStatus === currentStatus) return;
+  const unclosed = itemBoxRefs(id).find((ref) => ref.boxStatus !== '已闭环');
+  if (unclosed || currentStatus === '已装箱') {
+    const error = new Error(
+      '物品正在巡演闭环中（装箱单 ' + (unclosed ? unclosed.boxId : '未知') + '），状态只能经返场清点/缺损处理变更'
+    );
+    error.status = 409;
+    error.details = { occupiedBy: unclosed ? unclosed.boxId : null, currentStatus };
+    throw error;
+  }
+}
+
+// 偶头可用性标记与状态保持一致：占用中由工作流托管（恒为不可用，禁止显式篡改）；
+// 未占用时管理员可显式指定，未指定则随状态变化自动推导
+function deriveCurrentUsable(collection, id, record, status, nextData, explicit) {
+  if (collection !== 'puppetHeads') return;
+  const occupied = status === '已装箱' || itemBoxRefs(id).some((ref) => ref.boxStatus !== '已闭环');
+  if (occupied) {
+    nextData.currentUsable = false;
+  } else if (!explicit && status !== record.status) {
+    nextData.currentUsable = status === '可演出';
+  }
+}
+
 function seedIfEmpty() {
   const { count } = db.prepare('SELECT COUNT(*) AS count FROM records').get();
   if (count > 0) return;
@@ -242,6 +286,15 @@ app.post('/api/:collection', (req, res, next) => {
     const data = { ...collectionConfig.defaults, ...req.body };
     const status = data.status || collectionConfig.defaultStatus || '';
     validate(collectionConfig, data);
+    if (ITEM_COLLECTIONS.has(req.params.collection)) {
+      if (status === '已装箱') {
+        return res.status(409).json({ error: '「已装箱」状态只能由装箱流程设置' });
+      }
+      // 可用性标记与状态保持一致（未显式指定时按状态推导）
+      if (req.params.collection === 'puppetHeads' && req.body.currentUsable === undefined) {
+        data.currentUsable = status === '可演出';
+      }
+    }
     const createOne = db.transaction(() => {
       const id = insertRecord(req.params.collection, data, status);
       insertEvent({
@@ -277,11 +330,18 @@ app.patch('/api/:collection/:id', (req, res, next) => {
     if (WORKFLOW_LOCKED_COLLECTIONS.has(req.params.collection)) {
       return res.status(403).json({ error: req.params.collection + ' 由闭环工作流管理，状态只能通过装箱/巡演/返场/闭环接口流转' });
     }
-    findCollection(req.params.collection);
+    const collectionConfig = findCollection(req.params.collection);
     const record = loadRecord(req.params.collection, req.params.id);
     if (!record) return res.status(404).json({ error: 'not found' });
     const nextData = { ...recordData(record), ...req.body };
     const status = nextData.status || record.status;
+    if (ITEM_COLLECTIONS.has(req.params.collection)) {
+      if (req.body.status !== undefined && collectionConfig.statuses && !collectionConfig.statuses.includes(status)) {
+        return res.status(400).json({ error: 'invalid status: ' + status });
+      }
+      guardItemStatusChange(req.params.collection, req.params.id, status, record.status);
+      deriveCurrentUsable(req.params.collection, req.params.id, record, status, nextData, req.body.currentUsable !== undefined);
+    }
     const updateOne = db.transaction(() => {
       saveRecord(req.params.collection, req.params.id, nextData, status);
       insertEvent({
@@ -313,7 +373,9 @@ app.post('/api/:collection/:id/events', (req, res, next) => {
     if (collectionConfig.statuses && !collectionConfig.statuses.includes(status)) {
       return res.status(400).json({ error: 'invalid status: ' + status });
     }
+    guardItemStatusChange(req.params.collection, req.params.id, status, record.status);
     const nextData = { ...recordData(record), ...(req.body.fields || {}) };
+    deriveCurrentUsable(req.params.collection, req.params.id, record, status, nextData, !!(req.body.fields && 'currentUsable' in req.body.fields));
     const applyOne = db.transaction(() => {
       saveRecord(req.params.collection, req.params.id, nextData, status);
       insertEvent({
@@ -362,6 +424,18 @@ app.delete('/api/:collection/:id', (req, res, next) => {
       return res.status(403).json({ error: req.params.collection + ' 由闭环工作流管理，不允许删除' });
     }
     findCollection(req.params.collection);
+    if (ITEM_COLLECTIONS.has(req.params.collection)) {
+      const refs = itemBoxRefs(req.params.id);
+      if (refs.length) {
+        const unclosed = refs.find((ref) => ref.boxStatus !== '已闭环');
+        return res.status(409).json({
+          error: unclosed
+            ? '物品被未闭环装箱单 ' + unclosed.boxId + ' 占用，不能移除'
+            : '物品已被历史装箱单引用，为保证审计可追溯不能移除',
+          details: refs
+        });
+      }
+    }
     const removeOne = db.transaction(() => {
       db.prepare('DELETE FROM records WHERE collection = ? AND id = ?').run(req.params.collection, req.params.id);
       db.prepare('DELETE FROM events WHERE record_id = ?').run(req.params.id);

@@ -261,6 +261,96 @@ async function main() {
   r = await get(`/api/tourBoxes/${box1}`);
   check('装箱单详情含物品与缺损单', Array.isArray(r.json.items) && r.json.items.length === 2 && Array.isArray(r.json.lossReports) && r.json.lossReports.length === 1, r.json);
 
+  console.log('\n[17] 占用中的物品：不能移除、不能绕过工作流改状态');
+  const headE = (await post('/api/puppetHeads', headFields('武生', '火焰山'))).json.id;
+  const accW = (await post('/api/accessories', accFields('靠旗', '火焰山'))).json.id;
+  const box5 = (await post('/api/tourBoxes', { showName: '占用测试', venue: '泉州', play: '火焰山', headIds: [headE], accessoryIds: [accW] })).json.id;
+  r = await api('DELETE', `/api/puppetHeads/${headE}`);
+  check('移除占用中的偶头被拒（409）', r.status === 409, r);
+  r = await api('DELETE', `/api/accessories/${accW}`);
+  check('移除占用中的配件被拒（409）', r.status === 409, r);
+  check('偶头E 仍在且状态=已装箱', (await get(`/api/puppetHeads/${headE}`)).json.status === '已装箱');
+  r = await api('PATCH', `/api/puppetHeads/${headE}`, { body: { status: '可演出' } });
+  check('篡改占用中偶头为可演出被拒（409）', r.status === 409, r);
+  r = await api('PATCH', `/api/accessories/${accW}`, { body: { status: '在库' } });
+  check('篡改占用中配件为在库被拒（409）', r.status === 409, r);
+  r = await post(`/api/puppetHeads/${headE}/events`, { status: '可演出' });
+  check('events 接口篡改同样被拒（409）', r.status === 409, r);
+  r = await api('PATCH', `/api/puppetHeads/${headE}`, { body: { paintStatus: '左颊补注' } });
+  check('不改状态的字段修正仍允许（200）', r.status === 200 && r.json.status === '已装箱' && r.json.paintStatus === '左颊补注', r);
+  r = await api('PATCH', `/api/puppetHeads/${headE}`, { body: { currentUsable: true } });
+  check('占用中可用性标记由工作流托管，显式篡改不生效', r.status === 200 && r.json.currentUsable === false, r);
+  check('篡改尝试后偶头E 状态仍是已装箱', (await get(`/api/puppetHeads/${headE}`)).json.status === '已装箱');
+  await post(`/api/tourBoxes/${box5}/depart`, {});
+  r = await post(`/api/tourBoxes/${box5}/return`, {
+    checks: [
+      { itemType: 'puppetHead', itemId: headE, condition: '完好' },
+      { itemType: 'accessory', itemId: accW, condition: '完好' }
+    ]
+  });
+  check('被篡改尝试的箱子仍能正常返场（200）', r.status === 200, r);
+  r = await post(`/api/tourBoxes/${box5}/close`, {});
+  check('正常闭环（200）', r.status === 200 && r.json.status === '已闭环', r);
+  r = await api('DELETE', `/api/puppetHeads/${headE}`);
+  check('已闭环历史单引用的物品仍不可移除（409，保证可追溯）', r.status === 409, r);
+  check('历史装箱单详情物品完整', (await get(`/api/tourBoxes/${box5}`)).json.items.length === 2);
+  const headF = (await post('/api/puppetHeads', headFields('小生', '白蛇传'))).json.id;
+  r = await api('DELETE', `/api/puppetHeads/${headF}`);
+  check('从未装箱的物品可正常移除（204）', r.status === 204, r);
+
+  console.log('\n[18] 「已装箱」状态不能由通用接口进出');
+  const headG = (await post('/api/puppetHeads', headFields('老生', '白蛇传'))).json.id;
+  r = await api('PATCH', `/api/puppetHeads/${headG}`, { body: { status: '已装箱' } });
+  check('手工置为已装箱被拒（409）', r.status === 409, r);
+  r = await post('/api/puppetHeads', { ...headFields('老生', '白蛇传'), status: '已装箱' });
+  check('直接创建已装箱物品被拒（409）', r.status === 409, r);
+  r = await api('PATCH', `/api/puppetHeads/${headG}`, { body: { status: '不存在的状态' } });
+  check('非法状态值被拒（400）', r.status === 400, r);
+  r = await api('PATCH', `/api/puppetHeads/${headG}`, { body: { status: '待修补' } });
+  check('未占用物品的状态管理不受影响（200）', r.status === 200 && r.json.status === '待修补', r);
+  r = await api('DELETE', `/api/puppetHeads/${headG}`);
+  check('未引用物品可移除（204）', r.status === 204, r);
+
+  console.log('\n[19] 可用性标记：参与装箱校验、随装箱/返场/缺损处理联动');
+  const headH = (await post('/api/puppetHeads', { ...headFields('净角', '火焰山'), status: '可演出', currentUsable: false })).json.id;
+  r = await post('/api/tourBoxes', { showName: '标记测试', venue: '泉州', play: '火焰山', headIds: [headH], accessoryIds: [] });
+  check('状态可演出但标记不可用的偶头被拒（409，原因含可用性标记）', r.status === 409 && /可用性标记|currentUsable/.test(JSON.stringify(r.json)), r);
+  r = await api('PATCH', `/api/puppetHeads/${headH}`, { body: { currentUsable: true } });
+  check('显式修正标记（200）', r.status === 200 && r.json.currentUsable === true, r);
+  r = await post('/api/tourBoxes', { showName: '标记测试', venue: '泉州', play: '火焰山', headIds: [headH], accessoryIds: [] });
+  check('标记修正后可装箱（201）', r.status === 201, r);
+  const box6 = r.json.id;
+  let headHNow = (await get(`/api/puppetHeads/${headH}`)).json;
+  check('装箱后标记随状态联动为 false', headHNow.status === '已装箱' && headHNow.currentUsable === false, headHNow);
+  check('装箱单详情带出可用性标记', (await get(`/api/tourBoxes/${box6}`)).json.items[0].currentUsable === false);
+  await post(`/api/tourBoxes/${box6}/depart`, {});
+  await post(`/api/tourBoxes/${box6}/return`, { checks: [{ itemType: 'puppetHead', itemId: headH, condition: '缺损' }] });
+  headHNow = (await get(`/api/puppetHeads/${headH}`)).json;
+  check('返场缺损后 状态=待修补 且标记=false', headHNow.status === '待修补' && headHNow.currentUsable === false, headHNow);
+  const reportH = (await get(`/api/tourBoxes/${box6}`)).json.lossReports[0].id;
+  await post(`/api/lossReports/${reportH}/resolve`, { resolution: '已补齐' });
+  headHNow = (await get(`/api/puppetHeads/${headH}`)).json;
+  check('缺损补齐后 状态=可演出 且标记=true', headHNow.status === '可演出' && headHNow.currentUsable === true, headHNow);
+  r = await post(`/api/tourBoxes/${box6}/close`, {});
+  check('box6 闭环成功', r.status === 200 && r.json.status === '已闭环', r);
+  const headI = (await post('/api/puppetHeads', { ...headFields('丑角', '火焰山'), status: '待修补' })).json.id;
+  check('创建为待修补时标记自动 false', (await get(`/api/puppetHeads/${headI}`)).json.currentUsable === false);
+  r = await api('PATCH', `/api/puppetHeads/${headI}`, { body: { status: '可演出' } });
+  check('通用接口改为可演出时标记自动 true', r.status === 200 && r.json.currentUsable === true, r);
+  r = await api('PATCH', `/api/puppetHeads/${headI}`, { body: { status: '修补中' } });
+  check('通用接口改为修补中时标记自动 false', r.status === 200 && r.json.currentUsable === false, r);
+  const headJ = (await post('/api/puppetHeads', headFields('小生', '白蛇传'))).json.id;
+  const box7 = (await post('/api/tourBoxes', { showName: '遗失测试', venue: '厦门', play: '白蛇传', headIds: [headJ], accessoryIds: [] })).json.id;
+  await post(`/api/tourBoxes/${box7}/depart`, {});
+  await post(`/api/tourBoxes/${box7}/return`, { checks: [{ itemType: 'puppetHead', itemId: headJ, condition: '遗失' }] });
+  const reportJ = (await get(`/api/tourBoxes/${box7}`)).json.lossReports[0].id;
+  await post(`/api/lossReports/${reportJ}/resolve`, { resolution: '确认为遗失' });
+  const headJNow = (await get(`/api/puppetHeads/${headJ}`)).json;
+  check('确认遗失后 状态=不可演出 且标记=false', headJNow.status === '不可演出' && headJNow.currentUsable === false, headJNow);
+  await post(`/api/tourBoxes/${box7}/close`, {});
+  r = await post('/api/tourBoxes', { showName: '再来', venue: '厦门', play: '白蛇传', headIds: [headJ], accessoryIds: [] });
+  check('确认遗失的偶头不能再装箱（409）', r.status === 409, r);
+
   console.log(`\n结果：${passed} 通过，${failed} 失败`);
   if (failed) {
     console.log('失败用例：\n - ' + failures.join('\n - '));

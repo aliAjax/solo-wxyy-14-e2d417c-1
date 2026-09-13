@@ -78,21 +78,28 @@ function registerWorkflowRoutes(app, ctx) {
   const boxDetail = (boxId) => {
     const box = mustBox(boxId);
     const items = db.prepare(
-      `SELECT i.item_type AS itemType, i.item_id AS itemId, r.title, r.status
+      `SELECT i.item_type AS itemType, i.item_id AS itemId, r.title, r.status,
+              json_extract(r.data, '$.currentUsable') AS currentUsable
        FROM tour_box_items i
        JOIN records r ON r.id = i.item_id AND r.collection = CASE i.item_type WHEN 'puppetHead' THEN 'puppetHeads' ELSE 'accessories' END
        WHERE i.box_id = ?
        ORDER BY i.rowid ASC`
-    ).all(boxId);
+    ).all(boxId).map((item) => ({
+      ...item,
+      // json_extract 返回 0/1/null，配件无此标记则不输出该字段
+      currentUsable: item.currentUsable === null ? undefined : item.currentUsable === 1
+    }));
     return { ...box, items, lossReports: boxLossReports(boxId) };
   };
 
-  // 带乐观锁的物品状态变更：当前状态不符则整体回滚
+  // 带乐观锁的物品状态变更：当前状态不符则整体回滚；偶头可用性标记随状态联动
   const setItemStatus = ({ itemType, itemId, to, expected, action, actor, note, extra }) => {
     const collection = ITEM_COLLECTION[itemType];
     const record = loadRecord(collection, itemId);
     if (!record) throw httpError(409, `物品 ${itemId} 已不存在`);
-    const changes = saveRecord(collection, itemId, recordData(record), to, expected);
+    const data = recordData(record);
+    if (itemType === 'puppetHead') data.currentUsable = to === '可演出';
+    const changes = saveRecord(collection, itemId, data, to, expected);
     if (changes === 0) {
       const current = loadRecord(collection, itemId);
       throw httpError(409, `物品「${itemTitle(itemType, itemId)}」状态已变为「${current.status}」，操作冲突`, { itemId, expected, current: current.status });
@@ -182,6 +189,11 @@ function registerWorkflowRoutes(app, ctx) {
           const packable = PACKABLE_STATUS[itemType];
           if (record.status !== packable) {
             problems.push({ itemType, itemId, title: itemTitle(itemType, itemId), reason: `当前状态「${record.status}」，要求「${packable}」` });
+            continue;
+          }
+          // 可用性标记参与装箱校验：标记为不可用的偶头视为不可演出
+          if (itemType === 'puppetHead' && record.currentUsable === false) {
+            problems.push({ itemType, itemId, title: itemTitle(itemType, itemId), reason: '可用性标记 currentUsable=false，视为不可演出' });
             continue;
           }
           const occupiedBy = occupyingBox(itemType, itemId);
